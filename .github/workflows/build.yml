@@ -1,0 +1,75 @@
+name: Build Ticker Board
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: tickerboard
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Unpack the zip
+        run: |
+          echo "Repo contents:"; find . -maxdepth 2 -not -path './.git*' | sort
+          Z=$(ls -t *.zip 2>/dev/null | head -1)
+          if [ -z "$Z" ]; then echo "::error::No .zip found. Drag tickerboard-tv.zip into the repo."; exit 1; fi
+          echo "Using $Z"
+          rm -rf _src && mkdir _src && unzip -q "$Z" -d _src
+          SG=$(find _src -path '*android/settings.gradle' | head -1)
+          IX=$(find _src -name index.html -not -path '*/android/*' | head -1)
+          [ -n "$SG" ] || { echo "::error::No android folder inside $Z"; exit 1; }
+          [ -n "$IX" ] || { echo "::error::No index.html inside $Z"; exit 1; }
+          echo "ANDROID_DIR=$(dirname "$SG")" >> "$GITHUB_ENV"
+          mkdir -p _site && cp "$IX" _site/index.html && touch _site/.nojekyll
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.11.1'
+
+      - name: Build APK
+        run: |
+          OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          URL="https://${OWNER}.github.io/${{ github.event.repository.name }}/"
+          echo "Board URL baked into app: $URL"
+          cd "$ANDROID_DIR"
+          gradle assembleRelease -PboardUrl="$URL" --no-daemon
+          cp app/build/outputs/apk/release/app-release.apk "$GITHUB_WORKSPACE/tickerboard-tv.apk"
+
+      - name: Publish APK release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: Ticker Board TV (build ${{ github.run_number }})
+          make_latest: true
+          files: tickerboard-tv.apk
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy-page:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v4
